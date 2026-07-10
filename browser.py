@@ -1,48 +1,74 @@
-from PyQt6.QtWidgets import QInputDialog
 import sys
-from PyQt6.QtCore import QUrl, Qt, QTimer
+import cv2
+import mediapipe as mp
+import pyautogui
+import threading
+from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QToolBar, QLineEdit,
-    QAction, QMenu, QFileDialog, QMessageBox, QStatusBar
+    QAction, QFileDialog, QMessageBox, QStatusBar, QInputDialog
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineDownloadItem
+from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from PyQt6.QtPrintSupport import QPrintPreviewDialog
 
-class BrowserTab(QWebEngineView):
-    def __init__(self, profile):
-        super().__init__()
-        self.setPage(QWebEnginePage(profile, self))
-        self.setUrl(QUrl("https://www.google.com"))
+# ====================== HAND GESTURE CONTROLLER ======================
+class HandGestureController(threading.Thread):
+    def __init__(self, enabled=True):
+        super().__init__(daemon=True)
+        self.enabled = enabled
+        self.running = True
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+        self.screen_w, self.screen_h = pyautogui.size()
+        self.cap = cv2.VideoCapture(0)
+        self.prev_x = self.prev_y = 0
 
-    def contextMenuEvent(self, event):
-        menu = self.page().createStandardContextMenu()
-        menu.addAction("Inspect Element", self.show_dev_tools)
-        menu.exec(event.globalPos())
+    def run(self):
+        while self.running and self.cap.isOpened():
+            if not self.enabled:
+                continue
+            ret, frame = self.cap.read()
+            if not ret: continue
 
-    def show_dev_tools(self):
-        self.page().triggerAction(QWebEnginePage.WebAction.InspectElement)
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.hands.process(rgb)
 
+            if results.multi_hand_landmarks:
+                landmarks = results.multi_hand_landmarks[0].landmark
+                idx = landmarks[8]
+                x = int(idx.x * self.screen_w)
+                y = int(idx.y * self.screen_h)
+
+                sx = self.prev_x + (x - self.prev_x) / 6
+                sy = self.prev_y + (y - self.prev_y) / 6
+                pyautogui.moveTo(sx, sy, duration=0.01)
+                self.prev_x, self.prev_y = sx, sy
+
+                # Pinch to click
+                thumb = landmarks[4]
+                if abs(thumb.x - idx.x) < 0.06 and abs(thumb.y - idx.y) < 0.06:
+                    pyautogui.click()
+                    cv2.waitKey(150)
+
+    def stop(self):
+        self.running = False
+        if self.cap: self.cap.release()
+
+# ====================== CYGNUS AIRTUCH BROWSER ======================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Grok Browser")
+        self.setWindowTitle("Cygnus AirTouch Browser")
         self.setMinimumSize(1200, 800)
 
-        # Profile with basic ad blocking
-        self.profile = QWebEngineProfile("grok_profile", self)
-        self.profile.setHttpUserAgent("Mozilla/5.0 (compatible; GrokBrowser)")
-        
-        # Simple ad blocker (common domains)
-        self.ad_block_list = ["doubleclick.net", "googlesyndication.com", "ads.", "ad.", "tracking.", "analytics."]
+        self.profile = QWebEngineProfile("cygnus_profile", self)
+        self.hand_controller = HandGestureController(enabled=True)
+        self.hand_controller.start()
 
-        # Tabs
         self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.tabBarDoubleClicked.connect(self.add_new_tab)
         self.setCentralWidget(self.tabs)
-
-        # Status bar for downloads
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
 
@@ -50,136 +76,66 @@ class MainWindow(QMainWindow):
         self.add_new_tab(QUrl("https://www.google.com"))
 
     def setup_ui(self):
-        nav_bar = QToolBar("Navigation")
-        self.addToolBar(nav_bar)
+        toolbar = QToolBar("Navigation")
+        self.addToolBar(toolbar)
 
-        nav_bar.addAction("←", lambda: self.current_browser().back())
-        nav_bar.addAction("→", lambda: self.current_browser().forward())
-        nav_bar.addAction("⟳", lambda: self.current_browser().reload())
-        nav_bar.addAction("🏠", self.navigate_home)
+        toolbar.addAction("←", lambda: self.current_browser().back())
+        toolbar.addAction("→", lambda: self.current_browser().forward())
+        toolbar.addAction("⟳", lambda: self.current_browser().reload())
+        toolbar.addAction("🏠", lambda: self.current_browser().setUrl(QUrl("https://google.com")))
 
         self.url_bar = QLineEdit()
         self.url_bar.returnPressed.connect(self.navigate_to_url)
-        nav_bar.addWidget(self.url_bar)
+        toolbar.addWidget(self.url_bar)
 
-        nav_bar.addAction("+", self.add_new_tab)
-        nav_bar.addAction("🔍 Inspect", self.inspect_page)
+        toolbar.addAction("+ Tab", self.add_new_tab)
+        toolbar.addAction("🔍 Inspect", self.inspect_page)
 
-        # Menu Bar
-        menubar = self.menuBar()
-        
-        file_menu = menubar.addMenu("File")
-        file_menu.addAction("Open Local File / HTML", self.open_local_file)
-        file_menu.addAction("Print Page", self.print_page)
-        file_menu.addAction("Exit", self.close)
-
-        tools_menu = menubar.addMenu("Tools")
-        tools_menu.addAction("Dev Tools", self.inspect_page)
-        tools_menu.addAction("Inject Custom JS", self.inject_js)
-
-        settings_menu = menubar.addMenu("Settings")
-        settings_menu.addAction("Toggle Dark Mode", self.toggle_dark_mode)
-        settings_menu.addAction("Set Homepage", self.set_homepage)
-        settings_menu.addAction("Clear Browsing Data", self.clear_data)
+        # Hand Control
+        hand_act = QAction("🤚 AirTouch", self)
+        hand_act.setCheckable(True)
+        hand_act.setChecked(True)
+        hand_act.triggered.connect(self.toggle_hand)
+        toolbar.addAction(hand_act)
 
     def add_new_tab(self, url=None):
         if not url or isinstance(url, bool):
             url = QUrl("https://www.google.com")
-        tab = BrowserTab(self.profile)
-        index = self.tabs.addTab(tab, "New Tab")
-        self.tabs.setCurrentIndex(index)
-
-        tab.urlChanged.connect(self.update_urlbar)
-        tab.titleChanged.connect(self.update_title)
-        tab.page().profile().downloadRequested.connect(self.handle_download)
-        
-        QTimer.singleShot(500, lambda: self.apply_dark_mode(tab))
-        self.apply_ad_block(tab)
-
-    def apply_dark_mode(self, tab):
-        dark_script = """
-        document.documentElement.style.setProperty('color-scheme', 'dark');
-        if (document.body) {
-            document.body.style.backgroundColor = '#0f0f0f';
-            document.body.style.color = '#e0e0e0';
-        }
-        """
-        tab.page().runJavaScript(dark_script)
-
-    def apply_ad_block(self, tab):
-        block_script = f"""
-        const adDomains = {self.ad_block_list};
-        const observer = new MutationObserver(() => {{
-            document.querySelectorAll('iframe, img, script').forEach(el => {{
-                if (adDomains.some(d => el.src && el.src.includes(d))) el.remove();
-            }});
-        }});
-        observer.observe(document.documentElement, {{ childList: true, subtree: true }});
-        """
-        tab.page().runJavaScript(block_script)
+        tab = QWebEngineView()
+        tab.setPage(QWebEnginePage(self.profile, tab))
+        tab.setUrl(url)
+        idx = self.tabs.addTab(tab, "New Tab")
+        self.tabs.setCurrentIndex(idx)
+        tab.urlChanged.connect(lambda q: self.url_bar.setText(q.toString()))
+        tab.titleChanged.connect(lambda t: self.set_tab_title(t))
 
     def current_browser(self):
         return self.tabs.currentWidget()
-
-    def navigate_home(self):
-        if self.current_browser():
-            self.current_browser().setUrl(QUrl("https://www.google.com"))
 
     def navigate_to_url(self):
         url = QUrl(self.url_bar.text())
         if url.scheme() == "": url.setScheme("https")
         self.current_browser().setUrl(url)
 
-    def update_urlbar(self, q):
-        self.url_bar.setText(q.toString())
-
-    def update_title(self, title):
-        index = self.tabs.currentIndex()
-        self.tabs.setTabText(index, title[:25] + "..." if len(title) > 25 else title)
-        self.setWindowTitle(f"{title} - Grok Browser")
-
     def inspect_page(self):
         if self.current_browser():
             self.current_browser().page().triggerAction(QWebEnginePage.WebAction.InspectElement)
 
-    def open_local_file(self):
-        file, _ = QFileDialog.getOpenFileName(self, "Open HTML / File", "", "HTML Files (*.html *.htm);;All Files (*)")
-        if file:
-            self.add_new_tab(QUrl.fromLocalFile(file))
+    def toggle_hand(self, checked):
+        self.hand_controller.enabled = checked
+        self.statusBar.showMessage(f"AirTouch Hand Control {'Enabled' if checked else 'Disabled'}", 3000)
 
-    def print_page(self):
-        if self.current_browser():
-            dialog = QPrintPreviewDialog(self)
-            dialog.paintRequested.connect(self.current_browser().print)
-            dialog.exec()
+    def set_tab_title(self, title):
+        idx = self.tabs.currentIndex()
+        self.tabs.setTabText(idx, title[:30] if title else "Tab")
 
-    def handle_download(self, download: QWebEngineDownloadItem):
-        download.setDownloadDirectory("Downloads")
-        download.accept()
-        self.statusBar.showMessage(f"Downloading: {download.downloadFileName()}", 5000)
-
-    def inject_js(self):
-        code, ok = QInputDialog.getMultiLineText(self, "Inject JavaScript", "Enter JS code:")
-        if ok and code and self.current_browser():
-            self.current_browser().page().runJavaScript(code)
-
-    def toggle_dark_mode(self):
-        if self.current_browser():
-            self.apply_dark_mode(self.current_browser())
-
-    def set_homepage(self):
-        url, ok = QInputDialog.getText(self, "Set Homepage", "Enter URL:")
-        if ok and url:
-            # You can save this to settings in a real app (QSettings)
-            print(f"Homepage set to: {url}")
-
-    def clear_data(self):
-        self.profile.clearAllVisitedLinks()
-        QMessageBox.information(self, "Success", "Browsing data cleared!")
+    def closeEvent(self, event):
+        self.hand_controller.stop()
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setApplicationName("Grok Browser")
+    app.setApplicationName("Cygnus AirTouch Browser")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
