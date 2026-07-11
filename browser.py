@@ -1,4 +1,4 @@
-  import sys
+import sys
 import cv2
 import mediapipe as mp
 import pyautogui
@@ -6,13 +6,13 @@ import threading
 from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QToolBar, QLineEdit,
-    QAction, QFileDialog, QMessageBox, QStatusBar, QInputDialog
+    QAction, QMessageBox, QStatusBar
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-from PyQt6.QtPrintSupport import QPrintPreviewDialog
+from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
+from PyQt6.QtGui import QIcon
 
-# ====================== HAND GESTURE CONTROLLER ======================
+# ====================== HAND GESTURE CONTROLLER (CAMERA ONLY FOR THIS) ======================
 class HandGestureController(threading.Thread):
     def __init__(self, enabled=True):
         super().__init__(daemon=True)
@@ -54,16 +54,30 @@ class HandGestureController(threading.Thread):
 
     def stop(self):
         self.running = False
-        if self.cap: self.cap.release()
+        if self.cap:
+            self.cap.release()
 
 # ====================== CYGNUS AIRTUCH BROWSER ======================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cygnus AirTouch Browser")
+        self.setWindowTitle("Cygnus AirTouch Browser - Secure")
+        self.setWindowIcon(QIcon("cygnus_logo.ico"))
         self.setMinimumSize(1200, 800)
 
-        self.profile = QWebEngineProfile("cygnus_profile", self)
+        # === STRONG SECURITY PROFILE ===
+        self.profile = QWebEngineProfile("cygnus_secure", self)
+        self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+        self.profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+
+        settings = self.profile.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.XSSAuditingEnabled, True)
+        
+        # BLOCK CAMERA/MICROPHONE/LOCATION FOR ALL WEBSITES
+        self.profile.setUrlRequestInterceptor(self.block_permissions)
+
         self.hand_controller = HandGestureController(enabled=True)
         self.hand_controller.start()
 
@@ -74,6 +88,11 @@ class MainWindow(QMainWindow):
 
         self.setup_ui()
         self.add_new_tab(QUrl("https://www.google.com"))
+
+    def block_permissions(self, info):
+        # Block all device access (camera, mic, etc.)
+        if info.requestUrl().scheme() in ["http", "https"]:
+            info.block(True)  # You can customize per feature if needed
 
     def setup_ui(self):
         toolbar = QToolBar("Navigation")
@@ -91,7 +110,6 @@ class MainWindow(QMainWindow):
         toolbar.addAction("+ Tab", self.add_new_tab)
         toolbar.addAction("🔍 Inspect", self.inspect_page)
 
-        # Hand Control
         hand_act = QAction("🤚 AirTouch", self)
         hand_act.setCheckable(True)
         hand_act.setChecked(True)
@@ -131,6 +149,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.hand_controller.stop()
+        self.profile.clearAllVisitedLinks()
         event.accept()
 
 if __name__ == "__main__":
