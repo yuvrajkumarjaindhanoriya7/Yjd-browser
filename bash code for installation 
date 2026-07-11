@@ -1,3 +1,1 @@
-pip install pyqt6 pyqt6-webengine mediapipe opencv-python pyautogui numpy pyinstaller
-
-pyinstaller --onefile --windowed --icon=icon.ico --name "CygnusAirTouchBrowser" cygnus_browser.py
+pyinstaller --onefile --windowed --icon=cygnus_logo.ico --name "CygnusAirTouchBrowser" cygnus_browser.py
